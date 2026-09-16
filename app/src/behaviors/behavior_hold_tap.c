@@ -17,6 +17,7 @@
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/keycode_state_changed.h>
 #include <zmk/behavior.h>
+#include <zmk/behaviors/hold_tap.h>
 
 LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 
@@ -127,6 +128,20 @@ struct last_tapped {
 // Set time stamp to large negative number initially for test suites, but not
 // int64 min since it will overflow if -1 is added
 struct last_tapped last_tapped = {INT32_MIN, INT32_MIN};
+
+static enum zmk_behavior_hold_tap_state export_status(enum status status) {
+    switch (status) {
+    case STATUS_TAP:
+        return ZMK_BEHAVIOR_HOLD_TAP_STATE_TAP;
+    case STATUS_HOLD_INTERRUPT:
+        return ZMK_BEHAVIOR_HOLD_TAP_STATE_HOLD_INTERRUPT;
+    case STATUS_HOLD_TIMER:
+        return ZMK_BEHAVIOR_HOLD_TAP_STATE_HOLD_TIMER;
+    case STATUS_UNDECIDED:
+    default:
+        return ZMK_BEHAVIOR_HOLD_TAP_STATE_UNDECIDED;
+    }
+}
 
 static void store_last_tapped(int64_t timestamp) {
     if (timestamp > last_tapped.timestamp) {
@@ -881,3 +896,42 @@ static int behavior_hold_tap_init(const struct device *dev) {
 DT_INST_FOREACH_STATUS_OKAY(KP_INST)
 
 #endif /* DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT) */
+
+size_t zmk_behavior_hold_tap_get_active_states(
+    size_t max_states, struct zmk_behavior_hold_tap_active_state states[max_states]) {
+    size_t count = 0;
+
+#if DT_HAS_COMPAT_STATUS_OKAY(DT_DRV_COMPAT)
+    if (states == NULL) {
+        return 0;
+    }
+
+    for (int i = 0; i < ZMK_BHV_HOLD_TAP_MAX_HELD && count < max_states; i++) {
+        struct active_hold_tap *hold_tap = &active_hold_taps[i];
+
+        if (hold_tap->position == ZMK_BHV_HOLD_TAP_POSITION_NOT_USED || hold_tap->config == NULL) {
+            continue;
+        }
+
+        states[count++] = (struct zmk_behavior_hold_tap_active_state){
+            .position = hold_tap->position,
+#if IS_ENABLED(CONFIG_ZMK_SPLIT)
+            .source = hold_tap->source,
+#else
+            .source = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL,
+#endif
+            .timestamp = hold_tap->timestamp,
+            .state = export_status(hold_tap->status),
+            .hold_behavior_local_id = zmk_behavior_get_local_id(hold_tap->config->hold_behavior_dev),
+            .tap_behavior_local_id = zmk_behavior_get_local_id(hold_tap->config->tap_behavior_dev),
+            .param_hold = hold_tap->param_hold,
+            .param_tap = hold_tap->param_tap,
+        };
+    }
+#else
+    ARG_UNUSED(max_states);
+    ARG_UNUSED(states);
+#endif
+
+    return count;
+}

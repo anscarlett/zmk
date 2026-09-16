@@ -118,13 +118,14 @@ if (CONFIG_ZMK_STUDIO_RPC)
 
     # Turn off the default nanopb behavior
   set(NANOPB_GENERATE_CPP_STANDALONE OFF)
+  set(ZMK_STUDIO_PROTO_ROOT ${CMAKE_CURRENT_SOURCE_DIR})
 
-  nanopb_generate_cpp(proto_srcs proto_hdrs RELPATH ${ZEPHYR_ZMK_STUDIO_MESSAGES_MODULE_DIR}
-                        ${ZEPHYR_ZMK_STUDIO_MESSAGES_MODULE_DIR}/proto/zmk/studio.proto
-                        ${ZEPHYR_ZMK_STUDIO_MESSAGES_MODULE_DIR}/proto/zmk/meta.proto
-                        ${ZEPHYR_ZMK_STUDIO_MESSAGES_MODULE_DIR}/proto/zmk/core.proto
-                        ${ZEPHYR_ZMK_STUDIO_MESSAGES_MODULE_DIR}/proto/zmk/behaviors.proto
-                        ${ZEPHYR_ZMK_STUDIO_MESSAGES_MODULE_DIR}/proto/zmk/keymap.proto
+  nanopb_generate_cpp(proto_srcs proto_hdrs RELPATH ${ZMK_STUDIO_PROTO_ROOT}
+                        ${ZMK_STUDIO_PROTO_ROOT}/proto/zmk/studio.proto
+                        ${ZMK_STUDIO_PROTO_ROOT}/proto/zmk/meta.proto
+                        ${ZMK_STUDIO_PROTO_ROOT}/proto/zmk/core.proto
+                        ${ZMK_STUDIO_PROTO_ROOT}/proto/zmk/behaviors.proto
+                        ${ZMK_STUDIO_PROTO_ROOT}/proto/zmk/keymap.proto
   )
 
   target_include_directories(app PUBLIC ${CMAKE_CURRENT_BINARY_DIR})

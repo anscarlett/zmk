@@ -9,12 +9,18 @@
 LOG_MODULE_DECLARE(zmk_studio, CONFIG_ZMK_STUDIO_LOG_LEVEL);
 
 #include <drivers/behavior.h>
+#include <zephyr/sys/util.h>
 
 #include <zmk/behavior.h>
+#include <zmk/behaviors/hold_tap.h>
+#include <zmk/events/keycode_state_changed.h>
+#include <zmk/events/layer_state_changed.h>
+#include <zmk/events/position_state_changed.h>
 #include <zmk/matrix.h>
 #include <zmk/keymap.h>
 #include <zmk/studio/rpc.h>
 #include <zmk/physical_layouts.h>
+#include <zmk/hid.h>
 
 #include <pb_encode.h>
 
@@ -22,6 +28,58 @@ ZMK_RPC_SUBSYSTEM(keymap)
 
 #define KEYMAP_RESPONSE(type, ...) ZMK_RPC_RESPONSE(keymap, type, __VA_ARGS__)
 #define KEYMAP_NOTIFICATION(type, ...) ZMK_RPC_NOTIFICATION(keymap, type, __VA_ARGS__)
+
+static uint8_t pressed_positions[DIV_ROUND_UP(ZMK_KEYMAP_LEN, 8)];
+static uint8_t pressed_position_sources[ZMK_KEYMAP_LEN];
+
+struct effective_binding_details {
+    zmk_keymap_layer_id_t layer_id;
+    const struct zmk_behavior_binding *binding;
+};
+
+static zmk_keymap_RuntimeState runtime_state_snapshot(void);
+static int map_runtime_event(zmk_studio_Notification *n);
+
+static void set_pressed_position(uint32_t position, bool pressed, uint8_t source) {
+    if (position >= ZMK_KEYMAP_LEN) {
+        return;
+    }
+
+    WRITE_BIT(pressed_positions[position / 8], position % 8, pressed);
+    if (pressed) {
+        pressed_position_sources[position] = source;
+    } else {
+        pressed_position_sources[position] = ZMK_POSITION_STATE_CHANGE_SOURCE_LOCAL;
+    }
+}
+
+static int32_t behavior_binding_id(const struct zmk_behavior_binding *binding) {
+    if (binding == NULL || binding->behavior_dev == NULL) {
+        return -1;
+    }
+
+    return zmk_behavior_get_local_id(binding->behavior_dev);
+}
+
+static zmk_keymap_BehaviorBinding encode_behavior_binding_msg(const struct zmk_behavior_binding *binding) {
+    zmk_keymap_BehaviorBinding msg = zmk_keymap_BehaviorBinding_init_zero;
+    msg.behavior_id = behavior_binding_id(binding);
+
+    if (binding != NULL) {
+        msg.param1 = binding->param1;
+        msg.param2 = binding->param2;
+    }
+
+    return msg;
+}
+
+static struct effective_binding_details effective_binding_for_position(uint32_t position) {
+    zmk_keymap_layer_id_t layer_id = ZMK_KEYMAP_LAYER_ID_INVAL;
+    const struct zmk_behavior_binding *binding =
+        zmk_keymap_get_effective_layer_binding_at_idx(position, &layer_id);
+
+    return (struct effective_binding_details){.layer_id = layer_id, .binding = binding};
+}
 
 static bool encode_layer_bindings(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
     const zmk_keymap_layer_id_t layer_id = *(uint8_t *)*arg;
@@ -322,12 +380,159 @@ static bool encode_layouts(pb_ostream_t *stream, const pb_field_t *field, void *
     return true;
 }
 
+static bool encode_pressed_keys(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
+    ARG_UNUSED(arg);
+
+    for (uint32_t position = 0; position < ZMK_KEYMAP_LEN; position++) {
+        if (!(pressed_positions[position / 8] & BIT(position % 8))) {
+            continue;
+        }
+
+        zmk_keymap_PressedKey key = zmk_keymap_PressedKey_init_zero;
+        key.position = position;
+        key.source = pressed_position_sources[position];
+
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+
+        if (!pb_encode_submessage(stream, &zmk_keymap_PressedKey_msg, &key)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static zmk_keymap_HoldTapStatus hold_tap_status_to_proto(enum zmk_behavior_hold_tap_state state) {
+    switch (state) {
+    case ZMK_BEHAVIOR_HOLD_TAP_STATE_TAP:
+        return zmk_keymap_HoldTapStatus_HOLD_TAP_STATUS_TAP;
+    case ZMK_BEHAVIOR_HOLD_TAP_STATE_HOLD_INTERRUPT:
+        return zmk_keymap_HoldTapStatus_HOLD_TAP_STATUS_HOLD_INTERRUPT;
+    case ZMK_BEHAVIOR_HOLD_TAP_STATE_HOLD_TIMER:
+        return zmk_keymap_HoldTapStatus_HOLD_TAP_STATUS_HOLD_TIMER;
+    case ZMK_BEHAVIOR_HOLD_TAP_STATE_UNDECIDED:
+    default:
+        return zmk_keymap_HoldTapStatus_HOLD_TAP_STATUS_UNDECIDED;
+    }
+}
+
+static bool encode_active_hold_taps(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
+    ARG_UNUSED(arg);
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_HOLD_TAP)
+    struct zmk_behavior_hold_tap_active_state states[CONFIG_ZMK_BEHAVIOR_HOLD_TAP_MAX_HELD];
+    const size_t count = zmk_behavior_hold_tap_get_active_states(ARRAY_SIZE(states), states);
+#else
+    struct zmk_behavior_hold_tap_active_state states[1];
+    const size_t count = zmk_behavior_hold_tap_get_active_states(ARRAY_SIZE(states), states);
+#endif
+
+    for (size_t i = 0; i < count; i++) {
+        zmk_keymap_ActiveHoldTap msg = zmk_keymap_ActiveHoldTap_init_zero;
+        msg.position = states[i].position;
+        msg.source = states[i].source;
+        msg.status = hold_tap_status_to_proto(states[i].state);
+        msg.timestamp = states[i].timestamp;
+        msg.hold_behavior_id = states[i].hold_behavior_local_id;
+        msg.tap_behavior_id = states[i].tap_behavior_local_id;
+        msg.param_hold = states[i].param_hold;
+        msg.param_tap = states[i].param_tap;
+
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+
+        if (!pb_encode_submessage(stream, &zmk_keymap_ActiveHoldTap_msg, &msg)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static zmk_keymap_RuntimeState runtime_state_snapshot(void) {
+    zmk_keymap_RuntimeState resp = zmk_keymap_RuntimeState_init_zero;
+
+    resp.layer_state = zmk_keymap_layer_state();
+    resp.layer_locks = zmk_keymap_layer_locks();
+    resp.highest_layer = zmk_keymap_highest_layer_active();
+    resp.active_layout_index = zmk_physical_layouts_get_selected();
+    resp.active_modifiers = zmk_hid_get_keyboard_report()->body.modifiers;
+    resp.explicit_modifiers = zmk_hid_get_explicit_mods();
+    resp.pressed_keys.funcs.encode = encode_pressed_keys;
+    resp.active_hold_taps.funcs.encode = encode_active_hold_taps;
+
+    return resp;
+}
+
+static bool encode_effective_bindings(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
+    ARG_UNUSED(arg);
+
+    for (uint32_t position = 0; position < ZMK_KEYMAP_LEN; position++) {
+        struct effective_binding_details resolved = effective_binding_for_position(position);
+        zmk_keymap_EffectiveKeyBinding msg = zmk_keymap_EffectiveKeyBinding_init_zero;
+
+        msg.layer_id = resolved.layer_id == ZMK_KEYMAP_LAYER_ID_INVAL ? UINT32_MAX : resolved.layer_id;
+        msg.binding = encode_behavior_binding_msg(resolved.binding);
+
+        if (!pb_encode_tag_for_field(stream, field)) {
+            return false;
+        }
+
+        if (!pb_encode_submessage(stream, &zmk_keymap_EffectiveKeyBinding_msg, &msg)) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 zmk_studio_Response get_physical_layouts(const zmk_studio_Request *req) {
     LOG_DBG("");
     zmk_keymap_PhysicalLayouts resp = zmk_keymap_PhysicalLayouts_init_zero;
     resp.active_layout_index = zmk_physical_layouts_get_selected();
     resp.layouts.funcs.encode = encode_layouts;
     return KEYMAP_RESPONSE(get_physical_layouts, resp);
+}
+
+zmk_studio_Response get_runtime_state(const zmk_studio_Request *req) {
+    ARG_UNUSED(req);
+    return KEYMAP_RESPONSE(get_runtime_state, runtime_state_snapshot());
+}
+
+zmk_studio_Response get_effective_keymap(const zmk_studio_Request *req) {
+    ARG_UNUSED(req);
+
+    zmk_keymap_EffectiveKeymap resp = zmk_keymap_EffectiveKeymap_init_zero;
+    resp.bindings.funcs.encode = encode_effective_bindings;
+
+    return KEYMAP_RESPONSE(get_effective_keymap, resp);
+}
+
+zmk_studio_Response predict_position(const zmk_studio_Request *req) {
+    const uint32_t position = req->subsystem.keymap.request_type.predict_position.position;
+    zmk_keymap_PredictPositionResponse resp = zmk_keymap_PredictPositionResponse_init_zero;
+
+    if (position >= ZMK_KEYMAP_LEN) {
+        resp.which_result = zmk_keymap_PredictPositionResponse_err_tag;
+        resp.result.err = zmk_keymap_PredictPositionErrorCode_PREDICT_POSITION_ERR_INVALID_POSITION;
+        return KEYMAP_RESPONSE(predict_position, resp);
+    }
+
+    struct effective_binding_details resolved = effective_binding_for_position(position);
+    if (resolved.binding == NULL) {
+        resp.which_result = zmk_keymap_PredictPositionResponse_err_tag;
+        resp.result.err = zmk_keymap_PredictPositionErrorCode_PREDICT_POSITION_ERR_NO_BINDING;
+        return KEYMAP_RESPONSE(predict_position, resp);
+    }
+
+    resp.which_result = zmk_keymap_PredictPositionResponse_ok_tag;
+    resp.result.ok.layer_id = resolved.layer_id;
+    resp.result.ok.binding = encode_behavior_binding_msg(resolved.binding);
+
+    return KEYMAP_RESPONSE(predict_position, resp);
 }
 
 zmk_studio_Response set_active_physical_layout(const zmk_studio_Request *req) {
@@ -530,6 +735,9 @@ ZMK_RPC_SUBSYSTEM_HANDLER(keymap, check_unsaved_changes, ZMK_STUDIO_RPC_HANDLER_
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, save_changes, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, discard_changes, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, get_physical_layouts, ZMK_STUDIO_RPC_HANDLER_SECURED);
+ZMK_RPC_SUBSYSTEM_HANDLER(keymap, get_runtime_state, ZMK_STUDIO_RPC_HANDLER_SECURED);
+ZMK_RPC_SUBSYSTEM_HANDLER(keymap, get_effective_keymap, ZMK_STUDIO_RPC_HANDLER_SECURED);
+ZMK_RPC_SUBSYSTEM_HANDLER(keymap, predict_position, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, set_active_physical_layout, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, move_layer, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, add_layer, ZMK_STUDIO_RPC_HANDLER_SECURED);
@@ -537,6 +745,32 @@ ZMK_RPC_SUBSYSTEM_HANDLER(keymap, remove_layer, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, restore_layer, ZMK_STUDIO_RPC_HANDLER_SECURED);
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, set_layer_props, ZMK_STUDIO_RPC_HANDLER_SECURED);
 
-static int event_mapper(const zmk_event_t *eh, zmk_studio_Notification *n) { return 0; }
+static int map_runtime_event(zmk_studio_Notification *n) {
+    *n = KEYMAP_NOTIFICATION(runtime_state_changed, runtime_state_snapshot());
+    return 0;
+}
 
-ZMK_RPC_EVENT_MAPPER(keymap, event_mapper);
+static int event_mapper(const zmk_event_t *eh, zmk_studio_Notification *n) {
+    const struct zmk_position_state_changed *pos_ev = as_zmk_position_state_changed(eh);
+    if (pos_ev != NULL) {
+        set_pressed_position(pos_ev->position, pos_ev->state, pos_ev->source);
+        return map_runtime_event(n);
+    }
+
+    if (as_zmk_layer_state_changed(eh) != NULL) {
+        return map_runtime_event(n);
+    }
+
+    if (as_zmk_physical_layout_selection_changed(eh) != NULL) {
+        return map_runtime_event(n);
+    }
+
+    if (as_zmk_keycode_state_changed(eh) != NULL) {
+        return map_runtime_event(n);
+    }
+
+    return -ENOTSUP;
+}
+
+ZMK_RPC_EVENT_MAPPER(keymap, event_mapper, zmk_position_state_changed, zmk_layer_state_changed,
+                     zmk_physical_layout_selection_changed, zmk_keycode_state_changed);

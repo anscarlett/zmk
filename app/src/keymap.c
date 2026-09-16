@@ -23,6 +23,8 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/events/sensor_event.h>
 
+#define ZMK_TRANSPARENT_BEHAVIOR_DEV DEVICE_DT_NAME(DT_NODELABEL(trans))
+
 static zmk_keymap_layers_state_t _zmk_keymap_layer_locks = 0;
 static zmk_keymap_layers_state_t _zmk_keymap_layer_state = 0;
 static zmk_keymap_layer_id_t _zmk_keymap_layer_default = 0;
@@ -269,6 +271,38 @@ zmk_keymap_get_layer_binding_at_idx(zmk_keymap_layer_id_t layer_id, uint16_t bin
     }
 
     return &zmk_keymap[layer_id][mapped_idx];
+}
+
+const struct zmk_behavior_binding *
+zmk_keymap_get_effective_layer_binding_at_idx(uint16_t binding_idx, zmk_keymap_layer_id_t *layer_id) {
+    for (int layer_idx = ZMK_KEYMAP_LAYERS_LEN - 1;
+         layer_idx >= LAYER_ID_TO_INDEX(_zmk_keymap_layer_default); layer_idx--) {
+        zmk_keymap_layer_id_t candidate_layer_id = LAYER_INDEX_TO_ID(layer_idx);
+
+        if (candidate_layer_id == ZMK_KEYMAP_LAYER_ID_INVAL || !zmk_keymap_layer_active(candidate_layer_id)) {
+            continue;
+        }
+
+        const struct zmk_behavior_binding *binding =
+            zmk_keymap_get_layer_binding_at_idx(candidate_layer_id, binding_idx);
+
+        if (!binding || !binding->behavior_dev ||
+            strcmp(binding->behavior_dev, ZMK_TRANSPARENT_BEHAVIOR_DEV) == 0) {
+            continue;
+        }
+
+        if (layer_id != NULL) {
+            *layer_id = candidate_layer_id;
+        }
+
+        return binding;
+    }
+
+    if (layer_id != NULL) {
+        *layer_id = ZMK_KEYMAP_LAYER_ID_INVAL;
+    }
+
+    return NULL;
 }
 
 #if IS_ENABLED(CONFIG_ZMK_KEYMAP_SETTINGS_STORAGE)
