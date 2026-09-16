@@ -152,9 +152,8 @@ enum SetActivePhysicalLayoutErrorCode {
 }
 
 enum PredictPositionErrorCode {
-    PREDICT_POSITION_ERR_OK = 0;
-    PREDICT_POSITION_ERR_INVALID_POSITION = 1;
-    PREDICT_POSITION_ERR_NO_BINDING = 2;
+    PREDICT_POSITION_ERR_INVALID_POSITION = 0;
+    PREDICT_POSITION_ERR_NO_BINDING = 1;
 }
 
 enum HoldTapStatus {
