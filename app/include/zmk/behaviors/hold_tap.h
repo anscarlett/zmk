@@ -28,6 +28,12 @@ struct zmk_behavior_hold_tap_active_state {
 };
 
 #if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_HOLD_TAP)
+#define ZMK_BEHAVIOR_HOLD_TAP_ACTIVE_STATE_MAX CONFIG_ZMK_BEHAVIOR_HOLD_TAP_MAX_HELD
+#else
+#define ZMK_BEHAVIOR_HOLD_TAP_ACTIVE_STATE_MAX 1
+#endif
+
+#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_HOLD_TAP)
 size_t zmk_behavior_hold_tap_get_active_states(
     size_t max_states, struct zmk_behavior_hold_tap_active_state states[max_states]);
 #else

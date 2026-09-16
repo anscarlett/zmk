@@ -422,13 +422,8 @@ static zmk_keymap_HoldTapStatus hold_tap_status_to_proto(enum zmk_behavior_hold_
 static bool encode_active_hold_taps(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
     ARG_UNUSED(arg);
 
-#if IS_ENABLED(CONFIG_ZMK_BEHAVIOR_HOLD_TAP)
-    struct zmk_behavior_hold_tap_active_state states[CONFIG_ZMK_BEHAVIOR_HOLD_TAP_MAX_HELD];
+    struct zmk_behavior_hold_tap_active_state states[ZMK_BEHAVIOR_HOLD_TAP_ACTIVE_STATE_MAX];
     const size_t count = zmk_behavior_hold_tap_get_active_states(ARRAY_SIZE(states), states);
-#else
-    struct zmk_behavior_hold_tap_active_state states[1];
-    const size_t count = zmk_behavior_hold_tap_get_active_states(ARRAY_SIZE(states), states);
-#endif
 
     for (size_t i = 0; i < count; i++) {
         zmk_keymap_ActiveHoldTap msg = zmk_keymap_ActiveHoldTap_init_zero;
