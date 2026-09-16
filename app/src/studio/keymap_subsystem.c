@@ -14,6 +14,7 @@ LOG_MODULE_DECLARE(zmk_studio, CONFIG_ZMK_STUDIO_LOG_LEVEL);
 #include <zmk/behavior.h>
 #include <zmk/behaviors/hold_tap.h>
 #include <zmk/events/keycode_state_changed.h>
+#include <zmk/events/behavior_hold_tap_state_changed.h>
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/matrix.h>
@@ -769,8 +770,13 @@ static int event_mapper(const zmk_event_t *eh, zmk_studio_Notification *n) {
         return map_runtime_event(n);
     }
 
+    if (as_zmk_behavior_hold_tap_state_changed(eh) != NULL) {
+        return map_runtime_event(n);
+    }
+
     return -ENOTSUP;
 }
 
 ZMK_RPC_EVENT_MAPPER(keymap, event_mapper, zmk_position_state_changed, zmk_layer_state_changed,
-                     zmk_physical_layout_selection_changed, zmk_keycode_state_changed);
+                     zmk_physical_layout_selection_changed, zmk_keycode_state_changed,
+                     zmk_behavior_hold_tap_state_changed);

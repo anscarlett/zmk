@@ -16,6 +16,7 @@
 #include <zmk/event_manager.h>
 #include <zmk/events/position_state_changed.h>
 #include <zmk/events/keycode_state_changed.h>
+#include <zmk/events/behavior_hold_tap_state_changed.h>
 #include <zmk/behavior.h>
 #include <zmk/behaviors/hold_tap.h>
 
@@ -128,6 +129,13 @@ struct last_tapped {
 // Set time stamp to large negative number initially for test suites, but not
 // int64 min since it will overflow if -1 is added
 struct last_tapped last_tapped = {INT32_MIN, INT32_MIN};
+
+static void notify_hold_tap_state_changed(void) {
+    int err = raise_behavior_hold_tap_state_changed();
+    if (err < 0) {
+        LOG_WRN("Failed to raise hold-tap state changed (%d)", err);
+    }
+}
 
 static enum zmk_behavior_hold_tap_state export_status(enum status status) {
     switch (status) {
@@ -586,6 +594,7 @@ static void decide_hold_tap(struct active_hold_tap *hold_tap,
     undecided_hold_tap = NULL;
     press_binding(hold_tap);
     release_captured_events();
+    notify_hold_tap_state_changed();
 }
 
 static void decide_retro_tap(struct active_hold_tap *hold_tap) {
@@ -597,6 +606,7 @@ static void decide_retro_tap(struct active_hold_tap *hold_tap) {
         LOG_DBG("%d retro tap", hold_tap->position);
         hold_tap->status = STATUS_TAP;
         press_binding(hold_tap);
+        notify_hold_tap_state_changed();
         return;
     }
 }
@@ -613,6 +623,7 @@ static void update_hold_status_for_retro_tap(uint32_t ignore_position) {
             LOG_DBG("Update hold tap %d status to hold-interrupt", hold_tap->position);
             hold_tap->status = STATUS_HOLD_INTERRUPT;
             press_binding(hold_tap);
+            notify_hold_tap_state_changed();
         }
     }
 }
@@ -650,6 +661,7 @@ static int on_hold_tap_binding_pressed(struct zmk_behavior_binding *binding,
     // wait for the remaining time.
     int32_t tapping_term_ms_left = (hold_tap->timestamp + cfg->tapping_term_ms) - k_uptime_get();
     k_work_schedule(&hold_tap->work, K_MSEC(tapping_term_ms_left));
+    notify_hold_tap_state_changed();
 
     return ZMK_BEHAVIOR_OPAQUE;
 }
@@ -685,6 +697,7 @@ static int on_hold_tap_binding_released(struct zmk_behavior_binding *binding,
     } else {
         LOG_DBG("%d cleaning up hold-tap", event.position);
         clear_hold_tap(hold_tap);
+        notify_hold_tap_state_changed();
     }
 
     return ZMK_BEHAVIOR_OPAQUE;
@@ -853,6 +866,7 @@ void behavior_hold_tap_timer_work_handler(struct k_work *item) {
 
     if (hold_tap->work_is_cancelled) {
         clear_hold_tap(hold_tap);
+        notify_hold_tap_state_changed();
     } else {
         decide_hold_tap(hold_tap, HT_TIMER_EVENT);
     }
