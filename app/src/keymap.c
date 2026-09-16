@@ -23,7 +23,9 @@ LOG_MODULE_DECLARE(zmk, CONFIG_ZMK_LOG_LEVEL);
 #include <zmk/events/layer_state_changed.h>
 #include <zmk/events/sensor_event.h>
 
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_transparent)
 #define ZMK_TRANSPARENT_BEHAVIOR_DEV DEVICE_DT_NAME(DT_NODELABEL(trans))
+#endif
 
 static zmk_keymap_layers_state_t _zmk_keymap_layer_locks = 0;
 static zmk_keymap_layers_state_t _zmk_keymap_layer_state = 0;
@@ -275,8 +277,10 @@ zmk_keymap_get_layer_binding_at_idx(zmk_keymap_layer_id_t layer_id, uint16_t bin
 
 const struct zmk_behavior_binding *
 zmk_keymap_get_effective_layer_binding_at_idx(uint16_t binding_idx, zmk_keymap_layer_id_t *layer_id) {
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_transparent)
     const zmk_behavior_local_id_t transparent_local_id =
         zmk_behavior_get_local_id(ZMK_TRANSPARENT_BEHAVIOR_DEV);
+#endif
 
     for (int layer_idx = ZMK_KEYMAP_LAYERS_LEN - 1;
          layer_idx >= LAYER_ID_TO_INDEX(_zmk_keymap_layer_default); layer_idx--) {
@@ -289,10 +293,15 @@ zmk_keymap_get_effective_layer_binding_at_idx(uint16_t binding_idx, zmk_keymap_l
         const struct zmk_behavior_binding *binding =
             zmk_keymap_get_layer_binding_at_idx(candidate_layer_id, binding_idx);
 
-        if (!binding || !binding->behavior_dev ||
-            zmk_behavior_get_local_id(binding->behavior_dev) == transparent_local_id) {
+        if (!binding || !binding->behavior_dev) {
             continue;
         }
+
+#if DT_HAS_COMPAT_STATUS_OKAY(zmk_behavior_transparent)
+        if (zmk_behavior_get_local_id(binding->behavior_dev) == transparent_local_id) {
+            continue;
+        }
+#endif
 
         if (layer_id != NULL) {
             *layer_id = candidate_layer_id;

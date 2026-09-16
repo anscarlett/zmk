@@ -9,6 +9,7 @@
 LOG_MODULE_DECLARE(zmk_studio, CONFIG_ZMK_STUDIO_LOG_LEVEL);
 
 #include <drivers/behavior.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/util.h>
 
 #include <zmk/behavior.h>
@@ -32,13 +33,24 @@ ZMK_RPC_SUBSYSTEM(keymap)
 
 static uint8_t pressed_positions[DIV_ROUND_UP(ZMK_KEYMAP_LEN, 8)];
 static uint8_t pressed_position_sources[ZMK_KEYMAP_LEN];
+static atomic_t runtime_state_export_counter;
 
 struct effective_binding_details {
     zmk_keymap_layer_id_t layer_id;
     const struct zmk_behavior_binding *binding;
 };
 
-static zmk_keymap_RuntimeState runtime_state_snapshot(void);
+struct runtime_state_export {
+    zmk_keymap_RuntimeState msg;
+    uint8_t pressed_positions[DIV_ROUND_UP(ZMK_KEYMAP_LEN, 8)];
+    uint8_t pressed_position_sources[ZMK_KEYMAP_LEN];
+    struct zmk_behavior_hold_tap_active_state hold_taps[ZMK_BEHAVIOR_HOLD_TAP_ACTIVE_STATE_MAX];
+    size_t hold_tap_count;
+};
+
+static struct runtime_state_export runtime_state_exports[4];
+
+static zmk_keymap_RuntimeState runtime_state_snapshot(struct runtime_state_export **snapshot);
 static int map_runtime_event(zmk_studio_Notification *n);
 
 static uint32_t encode_layout_selection(int selection) {
@@ -47,6 +59,11 @@ static uint32_t encode_layout_selection(int selection) {
 
 static uint32_t encode_layer_id(zmk_keymap_layer_id_t layer_id) {
     return layer_id == ZMK_KEYMAP_LAYER_ID_INVAL ? UINT32_MAX : layer_id;
+}
+
+static struct runtime_state_export *next_runtime_state_export(void) {
+    return &runtime_state_exports[atomic_inc(&runtime_state_export_counter) %
+                                  ARRAY_SIZE(runtime_state_exports)];
 }
 
 static void set_pressed_position(uint32_t position, bool pressed, uint8_t source) {
@@ -390,16 +407,16 @@ static bool encode_layouts(pb_ostream_t *stream, const pb_field_t *field, void *
 }
 
 static bool encode_pressed_keys(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
-    ARG_UNUSED(arg);
+    const struct runtime_state_export *snapshot = *arg;
 
     for (uint32_t position = 0; position < ZMK_KEYMAP_LEN; position++) {
-        if (!(pressed_positions[position / 8] & BIT(position % 8))) {
+        if (!(snapshot->pressed_positions[position / 8] & BIT(position % 8))) {
             continue;
         }
 
         zmk_keymap_PressedKey key = zmk_keymap_PressedKey_init_zero;
         key.position = position;
-        key.source = pressed_position_sources[position];
+        key.source = snapshot->pressed_position_sources[position];
 
         if (!pb_encode_tag_for_field(stream, field)) {
             return false;
@@ -428,21 +445,18 @@ static zmk_keymap_HoldTapStatus hold_tap_status_to_proto(enum zmk_behavior_hold_
 }
 
 static bool encode_active_hold_taps(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
-    ARG_UNUSED(arg);
+    const struct runtime_state_export *snapshot = *arg;
 
-    struct zmk_behavior_hold_tap_active_state states[ZMK_BEHAVIOR_HOLD_TAP_ACTIVE_STATE_MAX];
-    const size_t count = zmk_behavior_hold_tap_get_active_states(ARRAY_SIZE(states), states);
-
-    for (size_t i = 0; i < count; i++) {
+    for (size_t i = 0; i < snapshot->hold_tap_count; i++) {
         zmk_keymap_ActiveHoldTap msg = zmk_keymap_ActiveHoldTap_init_zero;
-        msg.position = states[i].position;
-        msg.source = states[i].source;
-        msg.status = hold_tap_status_to_proto(states[i].state);
-        msg.timestamp = states[i].timestamp;
-        msg.hold_behavior_id = states[i].hold_behavior_local_id;
-        msg.tap_behavior_id = states[i].tap_behavior_local_id;
-        msg.param_hold = states[i].param_hold;
-        msg.param_tap = states[i].param_tap;
+        msg.position = snapshot->hold_taps[i].position;
+        msg.source = snapshot->hold_taps[i].source;
+        msg.status = hold_tap_status_to_proto(snapshot->hold_taps[i].state);
+        msg.timestamp = snapshot->hold_taps[i].timestamp;
+        msg.hold_behavior_id = snapshot->hold_taps[i].hold_behavior_local_id;
+        msg.tap_behavior_id = snapshot->hold_taps[i].tap_behavior_local_id;
+        msg.param_hold = snapshot->hold_taps[i].param_hold;
+        msg.param_tap = snapshot->hold_taps[i].param_tap;
 
         if (!pb_encode_tag_for_field(stream, field)) {
             return false;
@@ -456,19 +470,33 @@ static bool encode_active_hold_taps(pb_ostream_t *stream, const pb_field_t *fiel
     return true;
 }
 
-static zmk_keymap_RuntimeState runtime_state_snapshot(void) {
-    zmk_keymap_RuntimeState resp = zmk_keymap_RuntimeState_init_zero;
+static zmk_keymap_RuntimeState runtime_state_snapshot(struct runtime_state_export **snapshot) {
+    struct runtime_state_export *export = next_runtime_state_export();
 
-    resp.layer_state = zmk_keymap_layer_state();
-    resp.layer_locks = zmk_keymap_layer_locks();
-    resp.highest_layer = zmk_keymap_highest_layer_active();
-    resp.active_layout_index = encode_layout_selection(zmk_physical_layouts_get_selected());
-    resp.active_modifiers = zmk_hid_get_keyboard_report()->body.modifiers;
-    resp.explicit_modifiers = zmk_hid_get_explicit_mods();
-    resp.pressed_keys.funcs.encode = encode_pressed_keys;
-    resp.active_hold_taps.funcs.encode = encode_active_hold_taps;
+    memcpy(export->pressed_positions, pressed_positions, sizeof(export->pressed_positions));
+    memcpy(export->pressed_position_sources, pressed_position_sources,
+           sizeof(export->pressed_position_sources));
+    export->hold_tap_count =
+        zmk_behavior_hold_tap_get_active_states(ARRAY_SIZE(export->hold_taps), export->hold_taps);
 
-    return resp;
+    export->msg = (zmk_keymap_RuntimeState){
+        .layer_state = zmk_keymap_layer_state(),
+        .layer_locks = zmk_keymap_layer_locks(),
+        .highest_layer = zmk_keymap_highest_layer_active(),
+        .active_layout_index = encode_layout_selection(zmk_physical_layouts_get_selected()),
+        .active_modifiers = zmk_hid_get_keyboard_report()->body.modifiers,
+        .explicit_modifiers = zmk_hid_get_explicit_mods(),
+    };
+    export->msg.pressed_keys.funcs.encode = encode_pressed_keys;
+    export->msg.pressed_keys.arg = export;
+    export->msg.active_hold_taps.funcs.encode = encode_active_hold_taps;
+    export->msg.active_hold_taps.arg = export;
+
+    if (snapshot != NULL) {
+        *snapshot = export;
+    }
+
+    return export->msg;
 }
 
 static bool encode_effective_bindings(pb_ostream_t *stream, const pb_field_t *field, void *const *arg) {
@@ -503,7 +531,7 @@ zmk_studio_Response get_physical_layouts(const zmk_studio_Request *req) {
 
 zmk_studio_Response get_runtime_state(const zmk_studio_Request *req) {
     ARG_UNUSED(req);
-    return KEYMAP_RESPONSE(get_runtime_state, runtime_state_snapshot());
+    return KEYMAP_RESPONSE(get_runtime_state, runtime_state_snapshot(NULL));
 }
 
 zmk_studio_Response get_effective_keymap(const zmk_studio_Request *req) {
@@ -750,7 +778,7 @@ ZMK_RPC_SUBSYSTEM_HANDLER(keymap, restore_layer, ZMK_STUDIO_RPC_HANDLER_SECURED)
 ZMK_RPC_SUBSYSTEM_HANDLER(keymap, set_layer_props, ZMK_STUDIO_RPC_HANDLER_SECURED);
 
 static int map_runtime_event(zmk_studio_Notification *n) {
-    *n = KEYMAP_NOTIFICATION(runtime_state_changed, runtime_state_snapshot());
+    *n = KEYMAP_NOTIFICATION(runtime_state_changed, runtime_state_snapshot(NULL));
     return 0;
 }
 
