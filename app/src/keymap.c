@@ -275,6 +275,9 @@ zmk_keymap_get_layer_binding_at_idx(zmk_keymap_layer_id_t layer_id, uint16_t bin
 
 const struct zmk_behavior_binding *
 zmk_keymap_get_effective_layer_binding_at_idx(uint16_t binding_idx, zmk_keymap_layer_id_t *layer_id) {
+    const zmk_behavior_local_id_t transparent_local_id =
+        zmk_behavior_get_local_id(ZMK_TRANSPARENT_BEHAVIOR_DEV);
+
     for (int layer_idx = ZMK_KEYMAP_LAYERS_LEN - 1;
          layer_idx >= LAYER_ID_TO_INDEX(_zmk_keymap_layer_default); layer_idx--) {
         zmk_keymap_layer_id_t candidate_layer_id = LAYER_INDEX_TO_ID(layer_idx);
@@ -287,7 +290,7 @@ zmk_keymap_get_effective_layer_binding_at_idx(uint16_t binding_idx, zmk_keymap_l
             zmk_keymap_get_layer_binding_at_idx(candidate_layer_id, binding_idx);
 
         if (!binding || !binding->behavior_dev ||
-            strcmp(binding->behavior_dev, ZMK_TRANSPARENT_BEHAVIOR_DEV) == 0) {
+            zmk_behavior_get_local_id(binding->behavior_dev) == transparent_local_id) {
             continue;
         }
 

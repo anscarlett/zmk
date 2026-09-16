@@ -41,6 +41,14 @@ struct effective_binding_details {
 static zmk_keymap_RuntimeState runtime_state_snapshot(void);
 static int map_runtime_event(zmk_studio_Notification *n);
 
+static uint32_t encode_layout_selection(int selection) {
+    return selection < 0 ? UINT32_MAX : (uint32_t)selection;
+}
+
+static uint32_t encode_layer_id(zmk_keymap_layer_id_t layer_id) {
+    return layer_id == ZMK_KEYMAP_LAYER_ID_INVAL ? UINT32_MAX : layer_id;
+}
+
 static void set_pressed_position(uint32_t position, bool pressed, uint8_t source) {
     if (position >= ZMK_KEYMAP_LEN) {
         return;
@@ -454,7 +462,7 @@ static zmk_keymap_RuntimeState runtime_state_snapshot(void) {
     resp.layer_state = zmk_keymap_layer_state();
     resp.layer_locks = zmk_keymap_layer_locks();
     resp.highest_layer = zmk_keymap_highest_layer_active();
-    resp.active_layout_index = zmk_physical_layouts_get_selected();
+    resp.active_layout_index = encode_layout_selection(zmk_physical_layouts_get_selected());
     resp.active_modifiers = zmk_hid_get_keyboard_report()->body.modifiers;
     resp.explicit_modifiers = zmk_hid_get_explicit_mods();
     resp.pressed_keys.funcs.encode = encode_pressed_keys;
@@ -470,7 +478,7 @@ static bool encode_effective_bindings(pb_ostream_t *stream, const pb_field_t *fi
         struct effective_binding_details resolved = effective_binding_for_position(position);
         zmk_keymap_EffectiveKeyBinding msg = zmk_keymap_EffectiveKeyBinding_init_zero;
 
-        msg.layer_id = resolved.layer_id == ZMK_KEYMAP_LAYER_ID_INVAL ? UINT32_MAX : resolved.layer_id;
+        msg.layer_id = encode_layer_id(resolved.layer_id);
         msg.binding = encode_behavior_binding_msg(resolved.binding);
 
         if (!pb_encode_tag_for_field(stream, field)) {
@@ -488,7 +496,7 @@ static bool encode_effective_bindings(pb_ostream_t *stream, const pb_field_t *fi
 zmk_studio_Response get_physical_layouts(const zmk_studio_Request *req) {
     LOG_DBG("");
     zmk_keymap_PhysicalLayouts resp = zmk_keymap_PhysicalLayouts_init_zero;
-    resp.active_layout_index = zmk_physical_layouts_get_selected();
+    resp.active_layout_index = encode_layout_selection(zmk_physical_layouts_get_selected());
     resp.layouts.funcs.encode = encode_layouts;
     return KEYMAP_RESPONSE(get_physical_layouts, resp);
 }
@@ -525,7 +533,7 @@ zmk_studio_Response predict_position(const zmk_studio_Request *req) {
     }
 
     resp.which_result = zmk_keymap_PredictPositionResponse_ok_tag;
-    resp.result.ok.layer_id = resolved.layer_id;
+    resp.result.ok.layer_id = encode_layer_id(resolved.layer_id);
     resp.result.ok.binding = encode_behavior_binding_msg(resolved.binding);
 
     return KEYMAP_RESPONSE(predict_position, resp);
